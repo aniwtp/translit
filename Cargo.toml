@@ -1,0 +1,9 @@
+[package]
+name = "translit"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+deunicode = "=1.6.2"
+lindera = { version = "=4.0.1", features = ["embed-ipadic"] }
+pinyin = "=0.11.0"
