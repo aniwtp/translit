@@ -54,6 +54,82 @@ fn truncate_slug(slug: &str, max_len: usize) -> String {
     }
 }
 
+/// Знаки препинания, разрешённые в именах (ник, название команды/тайтла, имя персоны, название главы).
+/// Тот же список — у клиента (`@uikit/core` `nameError`): правки держать синхронными.
+pub const NAME_PUNCTUATION: &str = "-_.,!?:;'\"()[]&+#№/«»„“”‘’—–…@~*%";
+
+/// Почему имя не годится.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NameError {
+    /// Символ вне разрешённых: не буква, не цифра, не пробел и не знак из [`NAME_PUNCTUATION`]
+    /// (псевдографика `░█▓`, эмодзи, управляющие, «залго»-диакритика, невидимые пробелы).
+    BadChar(char),
+    /// Нет ни одной буквы или цифры — из имени не получается слаг.
+    NoSlug,
+}
+
+impl std::fmt::Display for NameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NameError::BadChar(c) if c.is_control() || c.is_whitespace() => {
+                write!(
+                    f,
+                    "Недопустимый символ U+{:04X}: разрешены буквы, цифры, пробел и знаки {NAME_PUNCTUATION}",
+                    *c as u32
+                )
+            }
+            NameError::BadChar(c) => {
+                write!(
+                    f,
+                    "Недопустимый символ «{c}»: разрешены буквы, цифры, пробел и знаки {NAME_PUNCTUATION}"
+                )
+            }
+            NameError::NoSlug => write!(f, "Имя должно содержать хотя бы одну букву или цифру"),
+        }
+    }
+}
+
+impl std::error::Error for NameError {}
+
+/// Огласовки и знаки письменностей, которые без них не пишутся (иврит, арабская, индийские, тайская, лаосская,
+/// тибетская, бирманская): часть из них не входит в Unicode `Alphabetic`. Общие комбинируемые диакритики
+/// (U+0300–036F и т.п.) сюда не входят — на них строится «залго»-текст; латиница и кириллица с диакритикой
+/// приходят готовыми буквами. Те же диапазоны — у клиента (`@uikit/core` `nameError`).
+pub const NAME_MARK_RANGES: &[(char, char)] = &[
+    ('\u{0591}', '\u{05C7}'),
+    ('\u{0610}', '\u{061A}'),
+    ('\u{064B}', '\u{065F}'),
+    ('\u{0670}', '\u{0670}'),
+    ('\u{06D6}', '\u{06ED}'),
+    ('\u{0900}', '\u{0DFF}'),
+    ('\u{0E00}', '\u{0FFF}'),
+    ('\u{1000}', '\u{109F}'),
+];
+
+/// Символ допустим в имени.
+pub fn is_name_char(c: char) -> bool {
+    c.is_alphabetic()
+        || c.is_numeric()
+        || c == ' '
+        || NAME_PUNCTUATION.contains(c)
+        || NAME_MARK_RANGES
+            .iter()
+            .any(|&(lo, hi)| (lo..=hi).contains(&c))
+}
+
+/// Имя пригодно для показа и слага: только буквы (Unicode `Alphabetic` и знаки [`NAME_MARK_RANGES`]), цифры
+/// (`Numeric`), обычный пробел и знаки из [`NAME_PUNCTUATION`], и слаг не пустой. Длину и обрезку пробелов
+/// проверяет вызывающий.
+pub fn check_name(input: &str) -> Result<(), NameError> {
+    if let Some(c) = input.chars().find(|&c| !is_name_char(c)) {
+        return Err(NameError::BadChar(c));
+    }
+    if slugify(input, usize::MAX).is_empty() {
+        return Err(NameError::NoSlug);
+    }
+    Ok(())
+}
+
 fn japanese_to_romaji(text: &str) -> String {
     let mut tokens = match JAPANESE_TOKENIZER.tokenize(text) {
         Ok(t) => t,
@@ -83,7 +159,13 @@ fn japanese_to_romaji(text: &str) -> String {
 
 fn chinese_to_pinyin(text: &str) -> String {
     text.chars()
-        .map(|c| if let Some(p) = c.to_pinyin() { p.plain().to_string() } else { c.to_string() })
+        .map(|c| {
+            if let Some(p) = c.to_pinyin() {
+                p.plain().to_string()
+            } else {
+                c.to_string()
+            }
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -147,12 +229,18 @@ mod tests {
     #[test]
     fn slug_basic() {
         assert_eq!(slugify("Привет Мир", 50), "privet-mir");
-        assert_eq!(slugify("Hello World! This is a test... 123?", 50), "hello-world-this-is-a-test-123");
+        assert_eq!(
+            slugify("Hello World! This is a test... 123?", 50),
+            "hello-world-this-is-a-test-123"
+        );
     }
 
     #[test]
     fn slug_truncates_at_word_boundary() {
-        assert_eq!(slugify("Hello World! This is a test... 123?", 20), "hello-world-this-is");
+        assert_eq!(
+            slugify("Hello World! This is a test... 123?", 20),
+            "hello-world-this-is"
+        );
     }
 
     #[test]
@@ -180,5 +268,38 @@ mod tests {
         // Старое поведение: rslug::Slugifier::new().truncate(50).slugify(name)
         assert_eq!(slugify("Атака Титанов", 50), "ataka-titanov");
         assert_eq!(slugify("Небо 9", 50), "nebo-9");
+    }
+
+    #[test]
+    fn names_allow_scripts_and_punctuation() {
+        for ok in [
+            "Атака Титанов",
+            "進撃の巨人",
+            "斗罗大陆",
+            "Naruto: Shippūden",
+            "Team #1 (beta)",
+            "«Север» — 2",
+            "नमस्ते",
+            "สวัสดี",
+        ] {
+            assert_eq!(check_name(ok), Ok(()), "{ok}");
+        }
+    }
+
+    #[test]
+    fn names_reject_cursed_symbols() {
+        assert_eq!(check_name("░░██▓▓▒"), Err(NameError::BadChar('░')));
+        assert_eq!(check_name("nick😀"), Err(NameError::BadChar('😀')));
+        assert_eq!(
+            check_name("z\u{0336}a"),
+            Err(NameError::BadChar('\u{0336}'))
+        );
+        assert_eq!(
+            check_name("a\u{200B}b"),
+            Err(NameError::BadChar('\u{200B}'))
+        );
+        assert_eq!(check_name("a\tb"), Err(NameError::BadChar('\t')));
+        assert_eq!(check_name("!!!"), Err(NameError::NoSlug));
+        assert_eq!(check_name(""), Err(NameError::NoSlug));
     }
 }
